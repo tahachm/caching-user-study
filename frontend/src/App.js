@@ -3,115 +3,97 @@ import "survey-core/defaultV2.min.css";
 import { Model } from "survey-core";
 import { Survey } from "survey-react-ui";
 import { createClient } from "@supabase/supabase-js";
+import CircularProgress from "@mui/material/CircularProgress";
 
 const supabase = createClient(
     process.env.REACT_APP_SUPABASE_URL,
     process.env.REACT_APP_SUPABASE_ANON_KEY
 );
 
+const QuestionType = {
+    VS: "vs",
+    SATISFACTION_1B: "satisfaction1b",
+    SATISFACTION_70B: "satisfaction70b",
+};
+
+const VS_QNS_COUNT = 3;
+const SATISFACTION_1B_QNS_COUNT = 3;
+const SATISFACTION_70B_QNS_COUNT = 3;
+
 function App() {
     const [survey, setSurvey] = useState(null);
     const [questions, setQuestions] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [assignedQids, setAssignedQids] = useState([]);
 
     const fetchQuestions = useCallback(async () => {
         try {
-            setLoading(true);
             const now = new Date().toISOString();
-            const selectedQids = new Set();
-            let vsQuestions = [];
-            let satisfaction1B = [];
-            let satisfaction70B = [];
 
-            // ✅ Reset Stale Assignments (Older than 5 Minutes)
-            await supabase
-                .from("responses")
-                .update({ assigned: false, assigned_at: null })
-                .lt(
-                    "assigned_at",
-                    new Date(Date.now() - 5 * 60 * 1000).toISOString()
-                )
-                .eq("assigned", true);
-
-            // ✅ Fetch Available Questions
-            let { data: allQuestions } = await supabase
-                .from("responses")
-                .select("*")
-                .eq("assigned", false)
-                .order("total_vs_votes", { ascending: true })
-                .order("total_satisfactory_votes_1b", { ascending: true })
-                .order("total_satisfactory_votes_70b", { ascending: true })
-                .limit(50);
-
-            // ✅ Unlock More If Not Enough
-            while (allQuestions.length < 9) {
-                let { data: oldQuestions } = await supabase
+            const fetchOldestLeastVotedQnsWithExclusion = async (
+                column,
+                limit,
+                excludeQids
+            ) => {
+                let query = supabase
                     .from("responses")
-                    .select("*")
-                    .eq("assigned", true)
-                    .order("assigned_at", { ascending: true })
-                    .limit(10);
+                    .select("*") // TODO: restrict fields
+                    .order("assigned_at", { ascending: true, nullsFirst: true }) // Fetch oldest
+                    .order(column, { ascending: true }); // Fetch least voted
 
-                if (!oldQuestions || oldQuestions.length === 0) {
-                    alert("❌ No more questions available to reset.");
-                    setLoading(false);
-                    return;
+                if (excludeQids.size > 0) {
+                    query = query.not(
+                        "qid",
+                        "in",
+                        `(${Array.from(excludeQids).join(",")})` //Exclude already picked questions
+                    );
                 }
 
+                const { data, error } = await query.limit(limit);
+
+                if (error) throw new Error(`Supabase Error: ${error.message}`);
+
+                return data || [];
+            };
+
+            const vsQuestions = await fetchOldestLeastVotedQnsWithExclusion(
+                "total_vs_votes",
+                VS_QNS_COUNT,
+                new Set()
+            );
+            const excludedQids = new Set(vsQuestions.map((q) => q.qid));
+            const satisfaction1B = await fetchOldestLeastVotedQnsWithExclusion(
+                "total_satisfactory_votes_1b",
+                SATISFACTION_1B_QNS_COUNT,
+                excludedQids
+            );
+            satisfaction1B.forEach((q) => excludedQids.add(q.qid));
+            const satisfaction70B = await fetchOldestLeastVotedQnsWithExclusion(
+                "total_satisfactory_votes_70b",
+                SATISFACTION_70B_QNS_COUNT,
+                excludedQids
+            );
+
+            vsQuestions.forEach((q) => (q.type = QuestionType.VS));
+            satisfaction1B.forEach(
+                (q) => (q.type = QuestionType.SATISFACTION_1B)
+            );
+            satisfaction70B.forEach(
+                (q) => (q.type = QuestionType.SATISFACTION_70B)
+            );
+
+            const updatedAssignedQnsTimestamps = async () => {
+                //
+                const qids = [
+                    ...vsQuestions,
+                    ...satisfaction1B,
+                    ...satisfaction70B,
+                ].map((q) => q.qid);
                 await supabase
                     .from("responses")
-                    .update({ assigned: false, assigned_at: null })
-                    .in(
-                        "qid",
-                        oldQuestions.map((q) => q.qid)
-                    );
-
-                let { data: updatedQuestions } = await supabase
-                    .from("responses")
-                    .select("*")
-                    .eq("assigned", false)
-                    .order("total_vs_votes", { ascending: true })
-                    .order("total_satisfactory_votes_1b", { ascending: true })
-                    .order("total_satisfactory_votes_70b", { ascending: true })
-                    .limit(50);
-
-                allQuestions = updatedQuestions;
-            }
-
-            // ✅ Select Questions (Ensuring No Overlap)
-            vsQuestions = allQuestions
-                .filter(
-                    (q) =>
-                        !selectedQids.has(q.qid) &&
-                        q.total_vs_votes !== undefined
-                )
-                .slice(0, 3);
-            vsQuestions.forEach((q) => selectedQids.add(q.qid));
-
-            satisfaction1B = allQuestions
-                .filter(
-                    (q) =>
-                        !selectedQids.has(q.qid) &&
-                        q.total_satisfactory_votes_1b !== undefined
-                )
-                .slice(0, 3);
-            satisfaction1B.forEach((q) => selectedQids.add(q.qid));
-
-            satisfaction70B = allQuestions
-                .filter(
-                    (q) =>
-                        !selectedQids.has(q.qid) &&
-                        q.total_satisfactory_votes_70b !== undefined
-                )
-                .slice(0, 3);
-            satisfaction70B.forEach((q) => selectedQids.add(q.qid));
-
-            // ✅ Assign Selected Questions in Database
-            await supabase
-                .from("responses")
-                .update({ assigned: true, assigned_at: now })
-                .in("qid", [...selectedQids]);
+                    .update({ assigned_at: now })
+                    .in("qid", qids);
+            };
+            updatedAssignedQnsTimestamps();
 
             setQuestions({
                 vsQuestions,
@@ -119,12 +101,9 @@ function App() {
                     () => Math.random() - 0.5
                 ),
             });
-            setAssignedQids([...selectedQids]);
         } catch (error) {
-            console.error("❌ Error fetching questions:", error);
+            console.error("Error fetching questions:", error);
             alert("Error fetching survey questions.");
-        } finally {
-            setLoading(false);
         }
     }, []);
 
@@ -132,21 +111,18 @@ function App() {
         fetchQuestions();
     }, [fetchQuestions]);
 
-    // ✅ Save survey responses and reset assigned flags
-    const storeSurveyResults = useCallback(
-        async (sender) => {
-            const results = sender.data;
+    const storeSurveyResultsInDb = useCallback(
+        async (survey, options) => {
+            // is aysnc okay or not
+            const results = survey.data;
+            options.showSaveInProgress();
 
             try {
-                for (const [qn, selectedValue] of Object.entries(results)) {
-                    // Check if it's a VS question
+                for (const [qnText, selectedValue] of Object.entries(results)) {
                     const matchingVs = questions.vsQuestions.find(
-                        (q) => q.question === qn
+                        (q) => q.question === qnText
                     );
                     if (matchingVs) {
-                        console.log(
-                            `🔹 Updating VS Question QID: ${matchingVs.qid}`
-                        );
                         await supabase
                             .from("responses")
                             .update({
@@ -159,49 +135,32 @@ function App() {
                         continue;
                     }
 
-                    // Check if it's a satisfaction question
                     const matchingSat = questions.mixedSatisfaction.find(
-                        (q) => q.question === qn
+                        (q) => q.question === qnText
                     );
                     if (matchingSat) {
-                        // Check whether it's a 1B or 70B satisfaction question based on available fields
-                        if (
-                            matchingSat.total_satisfactory_votes_1b !==
-                            undefined
-                        ) {
-                            // For 1B satisfaction question
-                            const fieldToUpdate = selectedValue
-                                ? "satisfactory_votes_1b_yes"
-                                : "satisfactory_votes_1b_no";
-                            console.log(
-                                `🔹 Updating 1B Satisfaction Question QID: ${matchingSat.qid}`
-                            );
+                        console.log(
+                            "Matching Satisfaction Question option:",
+                            selectedValue
+                        );
+                        if (matchingSat.type === QuestionType.SATISFACTION_1B) {
                             await supabase
                                 .from("responses")
                                 .update({
-                                    [fieldToUpdate]:
-                                        (matchingSat[fieldToUpdate] ?? 0) + 1,
+                                    [selectedValue]:
+                                        (matchingSat[selectedValue] ?? 0) + 1,
                                     total_satisfactory_votes_1b:
                                         (matchingSat.total_satisfactory_votes_1b ??
                                             0) + 1,
                                 })
                                 .eq("qid", matchingSat.qid);
-                        } else if (
-                            matchingSat.total_satisfactory_votes_70b !==
-                            undefined
-                        ) {
+                        } else {
                             // For 70B satisfaction question
-                            const fieldToUpdate = selectedValue
-                                ? "satisfactory_votes_70b_yes"
-                                : "satisfactory_votes_70b_no";
-                            console.log(
-                                `🔹 Updating 70B Satisfaction Question QID: ${matchingSat.qid}`
-                            );
                             await supabase
                                 .from("responses")
                                 .update({
-                                    [fieldToUpdate]:
-                                        (matchingSat[fieldToUpdate] ?? 0) + 1,
+                                    [selectedValue]:
+                                        (matchingSat[selectedValue] ?? 0) + 1,
                                     total_satisfactory_votes_70b:
                                         (matchingSat.total_satisfactory_votes_70b ??
                                             0) + 1,
@@ -211,37 +170,32 @@ function App() {
                     }
                 }
 
-                // ✅ Reset the assigned flag for all questions used in this survey
-                await supabase
-                    .from("responses")
-                    .update({ assigned: false, assigned_at: null })
-                    .in("qid", assignedQids);
-
-                console.log("✅ Survey Responses Successfully Updated in DB");
-                alert("✅ Thank you! Your responses have been submitted.");
+                console.log("Survey Responses Successfully Updated in DB");
+                options.showSaveSuccess();
             } catch (error) {
-                console.error("❌ Error saving survey responses:", error);
-                alert("An error occurred. Please try again.");
+                console.error("Error saving survey responses:", error);
+                options.showSaveError();
+                alert(
+                    "An error occurred in submission. Please contact the form administrator."
+                );
             }
         },
-        [questions, assignedQids]
+        [questions]
     );
 
     useEffect(() => {
-        if (loading || !questions) return;
+        if (!questions) return;
 
         const newSurvey = new Model();
         const surveyPage = newSurvey.addNewPage("SurveyPage");
 
-        // ✅ Add VS Section Instructions
+        // Versus section
         const vsInstructions = surveyPage.addNewQuestion(
             "html",
             "vsInstructions"
         );
         vsInstructions.html =
-            "<h4>Section 1: For each question below, you will see two AI-generated responses. Pick the response you prefer.</h4>";
-
-        // ✅ Add "VS" questions (randomized choices)
+            "<h3>Section 1</h3><h6>For each question below, you will see two AI-generated responses. Pick the response you prefer.</h6>";
         questions.vsQuestions.forEach((q) => {
             const newQuestion = surveyPage.addNewQuestion(
                 "radiogroup",
@@ -257,32 +211,51 @@ function App() {
             newQuestion.isRequired = true;
         });
 
-        // ✅ Add VS Section Instructions
-        const SatisfactionInstructions = surveyPage.addNewQuestion(
+        // Satisfaction section
+        const satisfactionInstructions = surveyPage.addNewQuestion(
             "html",
-            "SatisfactionInstructions"
+            "satisfactionInstructions"
         );
-        SatisfactionInstructions.html =
-            "<h4>Section 2: For each question below, you will see an AI-generated response. If you received this response after asking the question from an LLM, would you rate it as satisfactory or not satisfactory?</h4>";
-
-        // ✅ Add Satisfaction Questions (randomized order)
+        satisfactionInstructions.html =
+            "<h3>Section 2</h3><h6>For each question below, you will see an AI-generated response. If you received this response after asking the question from an LLM, would you rate it as satisfactory or not satisfactory?</h6>";
         questions.mixedSatisfaction.forEach((q) => {
             const toggle = surveyPage.addNewQuestion("boolean", q.question);
             toggle.description =
-                q.llama1b_tailored_response || q.llama70b_response;
-            toggle.labelTrue = "Yes";
-            toggle.labelFalse = "No";
+                q.type === QuestionType.SATISFACTION_1B
+                    ? q.llama1b_tailored_response
+                    : q.llama70b_response;
+            toggle.labelTrue = "👍";
+            toggle.labelFalse = "👎";
+            toggle.valueTrue = `satisfactory_votes_${
+                q.type === QuestionType.SATISFACTION_1B ? "1b" : "70b"
+            }_yes`;
+            toggle.valueFalse = `satisfactory_votes_${
+                q.type === QuestionType.SATISFACTION_1B ? "1b" : "70b"
+            }_no`;
             toggle.isRequired = true;
         });
 
-        newSurvey.onComplete.add(storeSurveyResults);
+        newSurvey.onComplete.add(async (survey, options) => {
+            await storeSurveyResultsInDb(survey, options);
+        });
         setSurvey(newSurvey);
-    }, [questions, loading, storeSurveyResults]);
+        setLoading(false);
+    }, [questions, storeSurveyResultsInDb]);
 
     return (
         <div>
             {loading ? (
-                <p>Loading survey...</p>
+                <div
+                    style={{
+                        display: "flex",
+                        justifyContent: "center",
+                        width: "100vw",
+                        height: "100vh",
+                        alignItems: "center",
+                    }}
+                >
+                    <CircularProgress size={"5rem"} />
+                </div>
             ) : (
                 survey && <Survey model={survey} />
             )}
