@@ -24,6 +24,7 @@ function App() {
     const [survey, setSurvey] = useState(null);
     const [questions, setQuestions] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [startTime, setStartTime] = useState(null);
 
     const fetchQuestions = useCallback(async () => {
         try {
@@ -112,8 +113,8 @@ function App() {
     }, [fetchQuestions]);
 
     const storeSurveyResultsInDb = useCallback(
-        async (survey, options) => {
-            // is aysnc okay or not
+        async (survey, options, timeTakenInSeconds) => {
+            console.log("TIME TAKEN:", timeTakenInSeconds); // ABEER: Use this for conditional saving
             const results = survey.data;
             options.showSaveInProgress();
 
@@ -236,9 +237,13 @@ function App() {
         });
 
         newSurvey.onComplete.add(async (survey, options) => {
-            await storeSurveyResultsInDb(survey, options);
+            const endTime = Date.now();
+            const timeTakenInSeconds = Math.floor((endTime - startTime) / 1000);
+
+            await storeSurveyResultsInDb(survey, options, timeTakenInSeconds);
         });
         setSurvey(newSurvey);
+        setStartTime(Date.now());
         setLoading(false);
     }, [questions, storeSurveyResultsInDb]);
 
