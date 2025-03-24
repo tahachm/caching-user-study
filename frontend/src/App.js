@@ -19,6 +19,9 @@ const QuestionType = {
 const VS_QNS_COUNT = 3;
 const SATISFACTION_1B_QNS_COUNT = 3;
 const SATISFACTION_70B_QNS_COUNT = 3;
+const MIN_SUBMISSION_TIME = 60; // seconds. Adjust as needed
+const MAIN_RESPONSE_TABLE = "responses_new"; // Adjust if table name changes
+const TIMED_RESPONSE_TABLE = "response_new_timed"; // Adjust if table name changes
 
 function App() {
     const [survey, setSurvey] = useState(null);
@@ -36,7 +39,7 @@ function App() {
                 excludeQids
             ) => {
                 let query = supabase
-                    .from("responses")
+                    .from(MAIN_RESPONSE_TABLE)
                     .select("*") // TODO: restrict fields
                     .order("assigned_at", { ascending: true, nullsFirst: true }) // Fetch oldest
                     .order(column, { ascending: true }); // Fetch least voted
@@ -90,7 +93,7 @@ function App() {
                     ...satisfaction70B,
                 ].map((q) => q.qid);
                 await supabase
-                    .from("responses")
+                    .from(MAIN_RESPONSE_TABLE)
                     .update({ assigned_at: now })
                     .in("qid", qids);
             };
@@ -125,7 +128,7 @@ function App() {
                     );
                     if (matchingVs) {
                         await supabase
-                            .from("responses")
+                            .from(MAIN_RESPONSE_TABLE)
                             .update({
                                 [selectedValue]:
                                     (matchingVs[selectedValue] ?? 0) + 1,
@@ -146,7 +149,7 @@ function App() {
                         );
                         if (matchingSat.type === QuestionType.SATISFACTION_1B) {
                             await supabase
-                                .from("responses")
+                                .from(MAIN_RESPONSE_TABLE)
                                 .update({
                                     [selectedValue]:
                                         (matchingSat[selectedValue] ?? 0) + 1,
@@ -158,7 +161,7 @@ function App() {
                         } else {
                             // For 70B satisfaction question
                             await supabase
-                                .from("responses")
+                                .from(MAIN_RESPONSE_TABLE)
                                 .update({
                                     [selectedValue]:
                                         (matchingSat[selectedValue] ?? 0) + 1,
@@ -167,6 +170,68 @@ function App() {
                                             0) + 1,
                                 })
                                 .eq("qid", matchingSat.qid);
+                        }
+                    }
+                }
+
+                // For only saving the survey responses if the user has spent at least MIN_SUBMISSION_TIME seconds
+                if (timeTakenInSeconds > MIN_SUBMISSION_TIME) {
+                    for (const [qnText, selectedValue] of Object.entries(
+                        results
+                    )) {
+                        const matchingVs = questions.vsQuestions.find(
+                            (q) => q.question === qnText
+                        );
+                        if (matchingVs) {
+                            await supabase
+                                .from(TIMED_RESPONSE_TABLE)
+                                .update({
+                                    [selectedValue]:
+                                        (matchingVs[selectedValue] ?? 0) + 1,
+                                    total_vs_votes:
+                                        (matchingVs.total_vs_votes ?? 0) + 1,
+                                })
+                                .eq("qid", matchingVs.qid);
+                            continue;
+                        }
+
+                        const matchingSat = questions.mixedSatisfaction.find(
+                            (q) => q.question === qnText
+                        );
+                        if (matchingSat) {
+                            console.log(
+                                "Matching Satisfaction Question option:",
+                                selectedValue
+                            );
+                            if (
+                                matchingSat.type ===
+                                QuestionType.SATISFACTION_1B
+                            ) {
+                                await supabase
+                                    .from(TIMED_RESPONSE_TABLE)
+                                    .update({
+                                        [selectedValue]:
+                                            (matchingSat[selectedValue] ?? 0) +
+                                            1,
+                                        total_satisfactory_votes_1b:
+                                            (matchingSat.total_satisfactory_votes_1b ??
+                                                0) + 1,
+                                    })
+                                    .eq("qid", matchingSat.qid);
+                            } else {
+                                // For 70B satisfaction question
+                                await supabase
+                                    .from(TIMED_RESPONSE_TABLE)
+                                    .update({
+                                        [selectedValue]:
+                                            (matchingSat[selectedValue] ?? 0) +
+                                            1,
+                                        total_satisfactory_votes_70b:
+                                            (matchingSat.total_satisfactory_votes_70b ??
+                                                0) + 1,
+                                    })
+                                    .eq("qid", matchingSat.qid);
+                            }
                         }
                     }
                 }
