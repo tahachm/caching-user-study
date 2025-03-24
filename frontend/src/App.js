@@ -19,7 +19,7 @@ const QuestionType = {
 const VS_QNS_COUNT = 3;
 const SATISFACTION_1B_QNS_COUNT = 3;
 const SATISFACTION_70B_QNS_COUNT = 3;
-const MIN_SUBMISSION_TIME = 60; // seconds. Adjust as needed
+const MIN_SUBMISSION_TIME = 45; // seconds. Adjust as needed
 const MAIN_RESPONSE_TABLE = "responses_new"; // Adjust if table name changes
 const TIMED_RESPONSE_TABLE = "response_new_timed"; // Adjust if table name changes
 
