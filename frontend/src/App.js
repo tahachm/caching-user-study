@@ -274,6 +274,13 @@ function App() {
                     text: q.llama1b_tailored_response,
                 },
             ].sort(() => Math.random() - 0.5);
+            newQuestion.choices = [
+                ...newQuestion.choices,
+                {
+                    value: "vs_votes_draw",
+                    text: "I prefer both responses equally",
+                },
+            ];
             newQuestion.isRequired = true;
         });
 
@@ -308,9 +315,13 @@ function App() {
             await storeSurveyResultsInDb(survey, options, timeTakenInSeconds);
         });
         setSurvey(newSurvey);
-        setStartTime(Date.now());
         setLoading(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [questions, storeSurveyResultsInDb]);
+
+    useEffect(() => {
+        setStartTime(Date.now());
+    }, []);
 
     return (
         <div>
