@@ -9,7 +9,6 @@ import { QuestionType } from "./types/questionTypes";
 
 const NUM_VERSUS_QNS = 3;
 const NUM_SATISFACTION_QNS = 6; // Must be even so we can split into small and large llm
-const MIN_SUBMISSION_TIME = 45; // seconds. Adjust as needed
 
 function App() {
     const [survey, setSurvey] = useState(null);
@@ -104,7 +103,9 @@ function App() {
             });
         } catch (error) {
             console.error("Error fetching questions:", error);
-            alert("Error fetching survey questions.");
+            alert(
+                "Error fetching survey questions. Please contact survey admin."
+            );
         }
     }, []);
 
@@ -119,7 +120,7 @@ function App() {
             options.showSaveInProgress();
 
             try {
-                await saveResponses(questions, results);
+                await saveResponses(questions, results, timeTakenInSeconds);
                 options.showSaveSuccess();
             } catch (error) {
                 console.error("Error saving survey responses:", error);
@@ -148,7 +149,7 @@ function App() {
         questions.vsQuestions.forEach((q) => {
             const newQuestion = surveyPage.addNewQuestion(
                 "radiogroup",
-                q.question
+                q.question_text
             );
             newQuestion.choices = [
                 { value: "big_llm", text: q.big_resp },
@@ -175,7 +176,10 @@ function App() {
         satisfactionInstructions.html =
             "<h3>Section 2</h3><h6>For each question below, you will see an AI-generated response. If you received this response after asking the question from an LLM, would you rate it as satisfactory or not satisfactory?</h6>";
         questions.mixedSatisfaction.forEach((q) => {
-            const toggle = surveyPage.addNewQuestion("boolean", q.question);
+            const toggle = surveyPage.addNewQuestion(
+                "boolean",
+                q.question_text
+            );
             toggle.description =
                 q.type === QuestionType.SATISFACTION_SMALL
                     ? q.small_resp

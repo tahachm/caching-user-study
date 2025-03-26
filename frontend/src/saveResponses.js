@@ -14,11 +14,13 @@ const getVoteValue = (selectedValue) => {
     return voteMap[selectedValue] ?? null; // fallback just in case
 };
 
-const saveResponses = async (questions, results) => {
+const saveResponses = async (questions, results, timeTakenInSeconds) => {
     // Step 1: Insert into response table
     const { data: responseInsert, error: responseInsertError } = await supabase
         .from("response")
-        .insert({})
+        .insert({
+            time_taken: timeTakenInSeconds,
+        })
         .select()
         .single();
 
@@ -32,7 +34,7 @@ const saveResponses = async (questions, results) => {
 
         // Try to find the question in versus or satisfaction lists
         const matchingVersusQn = questions.vsQuestions.find(
-            (q) => q.question === qnText
+            (q) => q.question_text === qnText
         );
         if (matchingVersusQn) {
             await supabase.from("votes_versus").insert({
@@ -44,7 +46,7 @@ const saveResponses = async (questions, results) => {
         }
 
         const matchingSatQn = questions.mixedSatisfaction.find(
-            (q) => q.question === qnText
+            (q) => q.question_text === qnText
         );
         if (matchingSatQn) {
             const modelShown =
