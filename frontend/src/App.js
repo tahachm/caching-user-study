@@ -2,26 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import "survey-core/defaultV2.min.css";
 import { Model } from "survey-core";
 import { Survey } from "survey-react-ui";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "./db/supabase";
+import { saveResponses } from "./saveResponses";
 import CircularProgress from "@mui/material/CircularProgress";
+import { QuestionType } from "./types/questionTypes";
 
-const supabase = createClient(
-    process.env.REACT_APP_SUPABASE_URL,
-    process.env.REACT_APP_SUPABASE_ANON_KEY
-);
-
-const QuestionType = {
-    VS: "vs",
-    SATISFACTION_1B: "satisfaction1b",
-    SATISFACTION_70B: "satisfaction70b",
-};
-
-const VS_QNS_COUNT = 3;
-const SATISFACTION_1B_QNS_COUNT = 3;
-const SATISFACTION_70B_QNS_COUNT = 3;
+const NUM_VERSUS_QNS = 3;
+const NUM_SATISFACTION_QNS = 6; // Must be even so we can split into small and large llm
 const MIN_SUBMISSION_TIME = 45; // seconds. Adjust as needed
-const MAIN_RESPONSE_TABLE = "responses_new"; // Adjust if table name changes
-const TIMED_RESPONSE_TABLE = "responses_new_timed"; // Adjust if table name changes
 
 function App() {
     const [survey, setSurvey] = useState(null);
@@ -33,75 +21,84 @@ function App() {
         try {
             const now = new Date().toISOString();
 
-            const fetchOldestLeastVotedQnsWithExclusion = async (
-                column,
-                limit,
-                excludeQids
-            ) => {
-                let query = supabase
-                    .from(MAIN_RESPONSE_TABLE)
-                    .select("*") // TODO: restrict fields
-                    .order("assigned_at", { ascending: true, nullsFirst: true }) // Fetch oldest
-                    .order(column, { ascending: true }); // Fetch least voted
+            // Call the RPC to get question stats (with vote counts)
+            const { data, error } = await supabase.rpc("get_question_stats");
 
-                if (excludeQids.size > 0) {
-                    query = query.not(
-                        "qid",
-                        "in",
-                        `(${Array.from(excludeQids).join(",")})` //Exclude already picked questions
-                    );
+            if (error) throw new Error(`Supabase RPC Error: ${error.message}`);
+            if (!data || data.length === 0)
+                throw new Error("No questions returned");
+
+            // Step 1: Sort by versus votes and pick NUM_VERSUS_QNS vs questions
+            const sortedByVs = [...data].sort(
+                (a, b) => a.vs_votes_total - b.vs_votes_total
+            );
+            const vsQuestions = sortedByVs.slice(0, NUM_VERSUS_QNS);
+            const usedQids = new Set(vsQuestions.map((q) => q.qid));
+
+            // Step 2: From the remaining, sort by total satisfaction votes and pick NUM_SATISFACTION_QNS candidates
+            const remaining = data.filter((q) => !usedQids.has(q.qid));
+            const sortedBySat = [...remaining].sort(
+                (a, b) => a.sat_votes_total - b.sat_votes_total
+            );
+            const satCandidates = sortedBySat.slice(0, NUM_SATISFACTION_QNS);
+
+            // Step 3: Balanced assignment for satisfaction questions
+            let satSmall = [];
+            let satLarge = [];
+            const num_per_group = NUM_SATISFACTION_QNS / 2;
+
+            // Iterate over the candidates and assign based on model-specific counts.
+            for (const q of satCandidates) {
+                // If both groups are not yet full:
+                if (
+                    satSmall.length < num_per_group &&
+                    satLarge.length < num_per_group
+                ) {
+                    if (q.sat_votes_small < q.sat_votes_large) {
+                        satSmall.push(q);
+                    } else if (q.sat_votes_large < q.sat_votes_small) {
+                        satLarge.push(q);
+                    } else {
+                        // If equal, assign randomly.
+                        if (Math.random() < 0.5) {
+                            satSmall.push(q);
+                        } else {
+                            satLarge.push(q);
+                        }
+                    }
+                } else if (satSmall.length < num_per_group) {
+                    satSmall.push(q);
+                } else if (satLarge.length < num_per_group) {
+                    satLarge.push(q);
                 }
+                // Stop if both groups have 3 questions.
+                if (
+                    satSmall.length === num_per_group &&
+                    satLarge.length === num_per_group
+                )
+                    break;
+            }
 
-                const { data, error } = await query.limit(limit);
+            // Step 4: Tag question type so the frontend knows which response to display.
+            vsQuestions.forEach((q) => (q.type = QuestionType.VERSUS));
+            satSmall.forEach((q) => (q.type = QuestionType.SATISFACTION_SMALL));
+            satLarge.forEach((q) => (q.type = QuestionType.SATISFACTION_LARGE));
 
-                if (error) throw new Error(`Supabase Error: ${error.message}`);
+            // Step 5: Update assigned_at for all selected questions.
+            const allSelectedQids = [
+                ...vsQuestions,
+                ...satSmall,
+                ...satLarge,
+            ].map((q) => q.qid);
+            await supabase
+                .from("question")
+                .update({ assigned_at: now })
+                .in("qid", allSelectedQids);
 
-                return data || [];
-            };
-
-            const vsQuestions = await fetchOldestLeastVotedQnsWithExclusion(
-                "total_vs_votes",
-                VS_QNS_COUNT,
-                new Set()
-            );
-            const excludedQids = new Set(vsQuestions.map((q) => q.qid));
-            const satisfaction1B = await fetchOldestLeastVotedQnsWithExclusion(
-                "total_satisfactory_votes_1b",
-                SATISFACTION_1B_QNS_COUNT,
-                excludedQids
-            );
-            satisfaction1B.forEach((q) => excludedQids.add(q.qid));
-            const satisfaction70B = await fetchOldestLeastVotedQnsWithExclusion(
-                "total_satisfactory_votes_70b",
-                SATISFACTION_70B_QNS_COUNT,
-                excludedQids
-            );
-
-            vsQuestions.forEach((q) => (q.type = QuestionType.VS));
-            satisfaction1B.forEach(
-                (q) => (q.type = QuestionType.SATISFACTION_1B)
-            );
-            satisfaction70B.forEach(
-                (q) => (q.type = QuestionType.SATISFACTION_70B)
-            );
-
-            const updatedAssignedQnsTimestamps = async () => {
-                //
-                const qids = [
-                    ...vsQuestions,
-                    ...satisfaction1B,
-                    ...satisfaction70B,
-                ].map((q) => q.qid);
-                await supabase
-                    .from(MAIN_RESPONSE_TABLE)
-                    .update({ assigned_at: now })
-                    .in("qid", qids);
-            };
-            updatedAssignedQnsTimestamps();
-
+            // Step 6: Update state.
             setQuestions({
                 vsQuestions,
-                mixedSatisfaction: [...satisfaction1B, ...satisfaction70B].sort(
+                mixedSatisfaction: [...satSmall, ...satLarge].sort(
                     () => Math.random() - 0.5
                 ),
             });
@@ -117,126 +114,12 @@ function App() {
 
     const storeSurveyResultsInDb = useCallback(
         async (survey, options, timeTakenInSeconds) => {
-            console.log("TIME TAKEN:", timeTakenInSeconds); // ABEER: Use this for conditional saving
+            console.log("Time taken to complete survey:", timeTakenInSeconds);
             const results = survey.data;
             options.showSaveInProgress();
 
             try {
-                for (const [qnText, selectedValue] of Object.entries(results)) {
-                    const matchingVs = questions.vsQuestions.find(
-                        (q) => q.question === qnText
-                    );
-                    if (matchingVs) {
-                        await supabase
-                            .from(MAIN_RESPONSE_TABLE)
-                            .update({
-                                [selectedValue]:
-                                    (matchingVs[selectedValue] ?? 0) + 1,
-                                total_vs_votes:
-                                    (matchingVs.total_vs_votes ?? 0) + 1,
-                            })
-                            .eq("qid", matchingVs.qid);
-                        continue;
-                    }
-
-                    const matchingSat = questions.mixedSatisfaction.find(
-                        (q) => q.question === qnText
-                    );
-                    if (matchingSat) {
-                        console.log(
-                            "Matching Satisfaction Question option:",
-                            selectedValue
-                        );
-                        if (matchingSat.type === QuestionType.SATISFACTION_1B) {
-                            await supabase
-                                .from(MAIN_RESPONSE_TABLE)
-                                .update({
-                                    [selectedValue]:
-                                        (matchingSat[selectedValue] ?? 0) + 1,
-                                    total_satisfactory_votes_1b:
-                                        (matchingSat.total_satisfactory_votes_1b ??
-                                            0) + 1,
-                                })
-                                .eq("qid", matchingSat.qid);
-                        } else {
-                            // For 70B satisfaction question
-                            await supabase
-                                .from(MAIN_RESPONSE_TABLE)
-                                .update({
-                                    [selectedValue]:
-                                        (matchingSat[selectedValue] ?? 0) + 1,
-                                    total_satisfactory_votes_70b:
-                                        (matchingSat.total_satisfactory_votes_70b ??
-                                            0) + 1,
-                                })
-                                .eq("qid", matchingSat.qid);
-                        }
-                    }
-                }
-
-                // For only saving the survey responses if the user has spent at least MIN_SUBMISSION_TIME seconds
-                if (timeTakenInSeconds > MIN_SUBMISSION_TIME) {
-                    for (const [qnText, selectedValue] of Object.entries(
-                        results
-                    )) {
-                        const matchingVs = questions.vsQuestions.find(
-                            (q) => q.question === qnText
-                        );
-                        if (matchingVs) {
-                            await supabase
-                                .from(TIMED_RESPONSE_TABLE)
-                                .update({
-                                    [selectedValue]:
-                                        (matchingVs[selectedValue] ?? 0) + 1,
-                                    total_vs_votes:
-                                        (matchingVs.total_vs_votes ?? 0) + 1,
-                                })
-                                .eq("qid", matchingVs.qid);
-                            continue;
-                        }
-
-                        const matchingSat = questions.mixedSatisfaction.find(
-                            (q) => q.question === qnText
-                        );
-                        if (matchingSat) {
-                            console.log(
-                                "Matching Satisfaction Question option:",
-                                selectedValue
-                            );
-                            if (
-                                matchingSat.type ===
-                                QuestionType.SATISFACTION_1B
-                            ) {
-                                await supabase
-                                    .from(TIMED_RESPONSE_TABLE)
-                                    .update({
-                                        [selectedValue]:
-                                            (matchingSat[selectedValue] ?? 0) +
-                                            1,
-                                        total_satisfactory_votes_1b:
-                                            (matchingSat.total_satisfactory_votes_1b ??
-                                                0) + 1,
-                                    })
-                                    .eq("qid", matchingSat.qid);
-                            } else {
-                                // For 70B satisfaction question
-                                await supabase
-                                    .from(TIMED_RESPONSE_TABLE)
-                                    .update({
-                                        [selectedValue]:
-                                            (matchingSat[selectedValue] ?? 0) +
-                                            1,
-                                        total_satisfactory_votes_70b:
-                                            (matchingSat.total_satisfactory_votes_70b ??
-                                                0) + 1,
-                                    })
-                                    .eq("qid", matchingSat.qid);
-                            }
-                        }
-                    }
-                }
-
-                console.log("Survey Responses Successfully Updated in DB");
+                await saveResponses(questions, results);
                 options.showSaveSuccess();
             } catch (error) {
                 console.error("Error saving survey responses:", error);
@@ -268,16 +151,16 @@ function App() {
                 q.question
             );
             newQuestion.choices = [
-                { value: "vs_votes_for_llama70b", text: q.llama70b_response },
+                { value: "big_llm", text: q.big_resp },
                 {
-                    value: "vs_votes_for_llama1b",
-                    text: q.llama1b_tailored_response,
+                    value: "small_llm",
+                    text: q.small_resp,
                 },
             ].sort(() => Math.random() - 0.5);
             newQuestion.choices = [
                 ...newQuestion.choices,
                 {
-                    value: "vs_votes_draw",
+                    value: "draw",
                     text: "I prefer both responses equally",
                 },
             ];
@@ -294,17 +177,13 @@ function App() {
         questions.mixedSatisfaction.forEach((q) => {
             const toggle = surveyPage.addNewQuestion("boolean", q.question);
             toggle.description =
-                q.type === QuestionType.SATISFACTION_1B
-                    ? q.llama1b_tailored_response
-                    : q.llama70b_response;
+                q.type === QuestionType.SATISFACTION_SMALL
+                    ? q.small_resp
+                    : q.big_resp;
             toggle.labelTrue = "👍";
             toggle.labelFalse = "👎";
-            toggle.valueTrue = `satisfactory_votes_${
-                q.type === QuestionType.SATISFACTION_1B ? "1b" : "70b"
-            }_yes`;
-            toggle.valueFalse = `satisfactory_votes_${
-                q.type === QuestionType.SATISFACTION_1B ? "1b" : "70b"
-            }_no`;
+            toggle.valueTrue = "satisfactory";
+            toggle.valueFalse = "not_satisfactory";
             toggle.isRequired = true;
         });
 
